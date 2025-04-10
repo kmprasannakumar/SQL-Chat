@@ -104,8 +104,8 @@ if "conversation_history" not in st.session_state:
 
 # Page config
 st.set_page_config(page_title="DataBridge AI", page_icon=":speech_balloon:")
-st.title("Chat with MySQL")
-st.write("An interactive AI-powered SQL assistant.")
+st.title("DataBridge AI")
+st.write("Bridging natural language and structured data.")
 
 # Sidebar
 with st.sidebar:
