@@ -1,5 +1,7 @@
 import streamlit as st
 import mysql.connector
+import os
+import re
 
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
@@ -11,13 +13,14 @@ from langchain_groq import ChatGroq
 from dotenv import load_dotenv
 load_dotenv()
 
-
 # Function to establish connection with MYSQL database
 def connect_database(hostname: str, port: str, username: str, password: str, database: str) -> SQLDatabase:
-    # uniform resource identifier
     db_uri = f"mysql+mysqlconnector://{username}:{password}@{hostname}:{port}/{database}"
     return SQLDatabase.from_uri(db_uri)
 
+# Function to clean SQL query
+def clean_sql_query(query: str) -> str:
+    return re.sub(r"```(sql)?", "", query).strip()
 
 # Function to generate SQL Query
 def get_sql_chain(db):
@@ -26,40 +29,40 @@ def get_sql_chain(db):
         Based on the table schema provided below, write a SQL query that answers the question. 
         Consider the conversation history.
 
-        ```<SCHEMA> {schema} </SCHEMA>```
+        <SCHEMA> {schema} </SCHEMA>
 
         Conversation History: {conversation_history}
 
         Write only the SQL query without any additional text.
-
-        For example:
-        Question: Who are the top 3 artists with the most tracks?
-        SQL Query: SELECT ArtistId, COUNT(*) as track_count FROM Track GROUP BY ArtistId ORDER BY track_count DESC LIMIT 3;
-
-        Response Format:
-            Question: {question}
-            SQL Query:
     """
 
-    # Prompt
     prompt = ChatPromptTemplate.from_template(template=prompt_template)
-    llm = ChatGroq(model="Mixtral-8x7b-32768", temperature=0.2)
+    llm = ChatGroq(model="mistral-saba-24b", temperature=0.2)
 
-    # Function to return the details / schema of the database
     def get_schema(_):
         return db.get_table_info()
 
     return (
-            RunnablePassthrough.assign(schema=get_schema)
-            | prompt
-            | llm
-            | StrOutputParser()
+        RunnablePassthrough.assign(schema=get_schema)
+        | prompt
+        | llm
+        | StrOutputParser()
     )
-
 
 # Function to convert SQL Query into Natural Language
 def get_response(user_query: str, db: SQLDatabase, conversation_history: list):
     sql_chain = get_sql_chain(db)
+    sql_query = clean_sql_query(sql_chain.invoke({
+        "question": user_query,
+        "conversation_history": conversation_history
+    }))
+
+    print("Generated SQL Query:\n", sql_query)
+
+    try:
+        response = db.run(sql_query)
+    except Exception as e:
+        response = f"Error executing SQL query: {e}"
 
     prompt_template = """
         You are a senior data analyst. 
@@ -69,26 +72,23 @@ def get_response(user_query: str, db: SQLDatabase, conversation_history: list):
         <SCHEMA> {schema} </SCHEMA>
         
         Conversation History: {conversation_history}
-        SQL Query: <SQL> {sql_query} </SQL>
+        SQL Query: {sql_query}
         Question: {question}
         SQL Response: {response}
-        
-        Response Format:
-            SQL Query:
-            Natural Language Response:
     """
 
     prompt = ChatPromptTemplate.from_template(template=prompt_template)
-    llm = ChatGroq(model="Mixtral-8x7b-32768", temperature=0.2)
+    llm = ChatGroq(model="mistral-saba-24b", temperature=0.2)
 
     chain = (
-            RunnablePassthrough.assign(sql_query=sql_chain).assign(
-                schema=lambda _: db.get_table_info(),
-                response=lambda vars: db.run(vars["sql_query"])
-            )
-            | prompt
-            | llm
-            | StrOutputParser()
+        RunnablePassthrough.assign(
+            schema=lambda _: db.get_table_info(),
+            sql_query=lambda _: sql_query,
+            response=lambda _: response
+        )
+        | prompt
+        | llm
+        | StrOutputParser()
     )
 
     return chain.invoke({
@@ -96,30 +96,27 @@ def get_response(user_query: str, db: SQLDatabase, conversation_history: list):
         "conversation_history": conversation_history
     })
 
-
 # Initialize conversation_history
 if "conversation_history" not in st.session_state:
     st.session_state.conversation_history = [
         AIMessage(content="Hello! I am a SQL assistant. Ask me questions about your MYSQL database.")
     ]
 
-
 # Page config
-st.set_page_config(page_title="SQL Chat", page_icon=":speech_balloon:")
-st.title("SQL Chat")
-
+st.set_page_config(page_title="DataBridge AI", page_icon=":speech_balloon:")
+st.title("Chat with MySQL")
+st.write("An interactive AI-powered SQL assistant.")
 
 # Sidebar
 with st.sidebar:
     st.subheader("Settings")
     st.write("Connect your MYSQL database and chat with it!")
 
-    # Connect database
     st.text_input("Hostname", value="localhost", key="Host")
     st.text_input("Port", value="3306", key="Port")
     st.text_input("Username", value="root", key="Username")
-    st.text_input("Password", type="password", key="Password")
-    st.text_input("Database", key="Database")
+    st.text_input("Password", value=os.getenv("DB_PASSWORD", ""), type="password", key="Password")
+    st.text_input("Database", value="chinook", key="Database")
 
     if st.button("Connect"):
         with st.spinner("Connecting to database..."):
@@ -131,29 +128,24 @@ with st.sidebar:
                     st.session_state["Password"],
                     st.session_state["Database"]
                 )
-
                 st.session_state.db = db
                 st.success("Connected to Database!")
-
             except mysql.connector.Error as err:
                 st.error(f"Error connecting to database: {err}")
-
 
 # Interactive chat interface
 for message in st.session_state.conversation_history:
     if isinstance(message, AIMessage):
         with st.chat_message("AI"):
             st.markdown(message.content)
-
     elif isinstance(message, HumanMessage):
         with st.chat_message("Human"):
             st.markdown(message.content)
 
-
 # User Query
 user_query = st.chat_input("Question your database...")
 
-if user_query is not None and len(user_query) > 0:
+if user_query and "db" in st.session_state:
     st.session_state.conversation_history.append(HumanMessage(content=user_query))
 
     with st.chat_message("Human"):
@@ -164,3 +156,6 @@ if user_query is not None and len(user_query) > 0:
         st.markdown(response)
 
     st.session_state.conversation_history.append(AIMessage(content=response))
+
+elif user_query:
+    st.warning("Please connect to a database first!")
